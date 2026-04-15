@@ -149,6 +149,9 @@ impl WorkspaceWorker {
     }
 
     /// Run different tools to collect diagnostics.
+    ///
+    /// # Errors
+    /// When calling `Tool::run_diagnostic` results into an error.
     pub async fn run_diagnostic(
         &self,
         document: &TextDocument<'_>,
@@ -158,6 +161,9 @@ impl WorkspaceWorker {
     }
 
     /// Run different tools to collect diagnostics on change.
+    ///
+    /// # Errors
+    /// When calling `Tool::run_diagnostic_on_change` results into an error.
     pub async fn run_diagnostic_on_change(
         &self,
         document: &TextDocument<'_>,
@@ -169,6 +175,9 @@ impl WorkspaceWorker {
     }
 
     /// Run different tools to collect diagnostics on save.
+    ///
+    /// # Errors
+    /// When calling `Tool::run_diagnostic_on_save` results into an error.
     pub async fn run_diagnostic_on_save(
         &self,
         document: &TextDocument<'_>,
@@ -183,6 +192,9 @@ impl WorkspaceWorker {
     /// - If the file is not formattable or is ignored, an empty vector is returned
     /// - If the file is formattable, but no changes are made, an empty vector is returned
     /// - If a tool error occurs, an Err is returned
+    ///
+    /// # Errors
+    /// When calling `Tool::run_format` results into an error.
     pub async fn format_file(&self, document: &TextDocument<'_>) -> Result<Vec<TextEdit>, String> {
         let tool_guard = self.tool.read().await;
         let Some(tool) = tool_guard.as_ref() else {
