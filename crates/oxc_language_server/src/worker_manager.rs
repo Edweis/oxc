@@ -16,13 +16,19 @@ use crate::{
     worker::WorkspaceWorker,
 };
 
+enum WorkerGuardGuard<'a> {
+    Vec(RwLockReadGuard<'a, Vec<WorkspaceWorker>>),
+    #[cfg(test)]
+    Single(RwLockReadGuard<'a, WorkspaceWorker>),
+}
+
 /// A RAII guard that holds a shared read lock over the workers list and exposes
 /// a reference to a single [`WorkspaceWorker`] inside it.
 ///
 /// Obtained from [`WorkerManager::get_worker_for_uri`].
 /// The read lock is held for as long as this guard is alive.
 pub struct WorkerGuard<'a> {
-    guard: RwLockReadGuard<'a, Vec<WorkspaceWorker>>,
+    guard: WorkerGuardGuard<'a>,
     index: usize,
 }
 
@@ -30,12 +36,16 @@ impl std::ops::Deref for WorkerGuard<'_> {
     type Target = WorkspaceWorker;
 
     fn deref(&self) -> &Self::Target {
-        &self.guard[self.index]
+        match &self.guard {
+            WorkerGuardGuard::Vec(vec_guard) => &vec_guard[self.index],
+            #[cfg(test)]
+            WorkerGuardGuard::Single(single_guard) => single_guard,
+        }
     }
 }
 
 /// The mode that the [`WorkerManager`] is operating in, which determines how it manages workers and delegates the task to the tool.
-enum ManagerMode {
+pub enum ManagerMode {
     // the manager requires an explicit workspace to operate
     // these workspaces are managed by the client and communicated via `initialize` + `didChangeWorkspaceFolders`
     #[expect(dead_code)] // needs to be implemented
@@ -48,8 +58,8 @@ enum ManagerMode {
     ),
     // The manager will create workers dynamically for file URIs. It also supports workspaces configured by the client, but does not require them.
     // This is useful for tasks on URIs that are outside of any configured workspace.
-    #[expect(dead_code)] // needs to be implemented
-    DynamicWithWorkspaces,
+    #[cfg(test)] // needs to be implemented
+    DynamicWithWorkspaces(Box<RwLock<WorkspaceWorker>>),
 }
 
 /// Manages the lifecycle of [`WorkspaceWorker`]s for the language server.
@@ -80,6 +90,11 @@ impl WorkerManager {
             mode: ManagerMode::DynamicNoWorkspaces(AtomicBool::new(false)),
             tool_builder,
         }
+    }
+
+    #[cfg(test)]
+    pub fn new_with_mode(tool_builder: Arc<dyn ToolBuilder>, mode: ManagerMode) -> Self {
+        Self { mode, tool_builder, workers: RwLock::new(vec![]) }
     }
 
     // ── State accessors ───────────────────────────────────────────────────────
@@ -178,13 +193,25 @@ impl WorkerManager {
     /// typescript-language-server.
     pub async fn get_worker_for_uri(&self, uri: &Uri) -> Option<WorkerGuard<'_>> {
         let guard = self.workers.read().await;
-        let index = Self::find_worker_index_for_uri(&guard, uri)?;
-        Some(WorkerGuard { guard, index })
+        if let Some(index) = Self::find_worker_index_for_uri(&guard, uri) {
+            return Some(WorkerGuard { guard: WorkerGuardGuard::Vec(guard), index });
+        }
+
+        #[cfg(test)]
+        if let ManagerMode::DynamicWithWorkspaces(worker) = &self.mode {
+            // In DynamicWithWorkspaces mode, if no worker matches the URI, fallback to the dynamic worker.
+            return Some(WorkerGuard {
+                guard: WorkerGuardGuard::Single(worker.read().await),
+                index: 0,
+            });
+        }
+
+        None
     }
 
     /// Return the URI for the parent directory of a `file://` URI, or `None`
     /// when the URI has no parent or cannot be converted to a path.
-    pub fn get_parent_dir_uri(file_uri: &Uri) -> Option<Uri> {
+    fn get_parent_dir_uri(file_uri: &Uri) -> Option<Uri> {
         let file_path = file_uri.to_file_path()?;
         let parent = file_path.parent()?;
         Uri::from_file_path(parent)
@@ -327,6 +354,11 @@ impl WorkerManager {
         worker_root_uri: &Uri,
         open_uris: &[Uri],
     ) -> Option<(Vec<Uri>, Vec<Unregistration>)> {
+        // Bail out immediately if we are not in single-file mode.
+        if !self.is_single_file_mode() {
+            return None;
+        }
+
         let worker = {
             let mut workers = self.workers.write().await;
 
@@ -355,6 +387,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use tokio::sync::RwLock;
     use tower_lsp_server::ls_types::Uri;
 
     use crate::{
@@ -612,5 +645,33 @@ mod tests {
         let file: Uri = Uri::from_file_path(fixture.join("text.txt")).unwrap();
         let worker = manager.get_worker_for_uri(&file).await;
         assert!(worker.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_worker_for_uri_dynamic_with_workspaces() {
+        let dynamic_worker = WorkspaceWorker::new(
+            "file:///".parse().unwrap(),
+            create_builder(),
+            DiagnosticMode::None,
+        );
+        let manager = WorkerManager::new_with_mode(
+            create_builder(),
+            crate::worker_manager::ManagerMode::DynamicWithWorkspaces(Box::new(RwLock::new(
+                dynamic_worker,
+            ))),
+        );
+        manager.set_all_workers(vec![]).await;
+
+        // File in workspace should match dynamic worker
+        let file: Uri = "file:///any/path/file.js".parse().unwrap();
+        let worker = manager.get_worker_for_uri(&file).await;
+        assert!(worker.is_some());
+        assert_eq!(worker.unwrap().get_root_uri().as_str(), "file:///");
+
+        // Non-file URI should also match dynamic worker
+        let non_file_uri: Uri = "untitled:///Untitled-1".parse().unwrap();
+        let worker = manager.get_worker_for_uri(&non_file_uri).await;
+        assert!(worker.is_some());
+        assert_eq!(worker.unwrap().get_root_uri().as_str(), "file:///");
     }
 }
