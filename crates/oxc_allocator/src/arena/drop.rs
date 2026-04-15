@@ -62,7 +62,7 @@ impl<const MIN_ALIGN: usize> Arena<MIN_ALIGN> {
                 is_pointer_aligned_to(cur_chunk.as_ptr(), MIN_ALIGN),
                 "bump pointer {cur_chunk:#p} should be aligned to the minimum alignment of {MIN_ALIGN:#x}"
             );
-            cur_chunk.as_ref().cursor_ptr.set(cur_chunk.cast());
+            self.cursor_ptr.set(cur_chunk.cast::<u8>());
 
             let current_chunk_footer = self.current_chunk_footer.get().as_ref();
             debug_assert!(
@@ -70,8 +70,8 @@ impl<const MIN_ALIGN: usize> Arena<MIN_ALIGN> {
                 "We should only have a single chunk"
             );
             debug_assert_eq!(
-                current_chunk_footer.cursor_ptr.get(),
-                self.current_chunk_footer.get().cast(),
+                self.cursor_ptr.get(),
+                self.current_chunk_footer.get().cast::<u8>(),
                 "Our chunk's bump cursor should be reset to the start of its allocation"
             );
         }
